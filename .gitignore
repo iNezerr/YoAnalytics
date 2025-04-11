@@ -1,0 +1,66 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment and virtual environments
+.env
+.ya
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+
+# Streamlit
+.streamlit/
+
+# YouTube API credentials and tokens
+client_secrets.json
+token.pickle
+credentials.json
+
+# Logs
+*.log
+
+# Data files
+*.csv
+*.xlsx
+*.xls
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local configuration
+local_settings.py
+settings.local.py
+
+# Downloaded data or output folders
+downloads/
+output/
+reports/
