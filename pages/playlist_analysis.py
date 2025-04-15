@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from collections import Counter
 from wordcloud import WordCloud
@@ -203,11 +203,27 @@ playlists_df = pd.DataFrame(st.session_state.playlists)
 
 # Select a playlist to analyze
 st.subheader("Select a Playlist/Series to Analyze")
-selected_playlist = st.selectbox(
-    "Choose a playlist",
-    options=playlists_df['id'].tolist(),
-    format_func=lambda x: playlists_df[playlists_df['id'] == x]['title'].iloc[0]
-)
+
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    selected_playlist = st.selectbox(
+        "Choose a playlist",
+        options=playlists_df['id'].tolist(),
+        format_func=lambda x: playlists_df[playlists_df['id'] == x]['title'].iloc[0]
+    )
+
+with col2:
+    # Add date range filter
+    default_end_date = datetime.now()
+    default_start_date = default_end_date - timedelta(days=180)  # Default to last 6 months
+    
+    start_date = st.date_input("Start Date", value=default_start_date)
+    end_date = st.date_input("End Date", value=default_end_date)
+    
+    if start_date > end_date:
+        st.error("Start date must be before end date")
+        st.stop()
 
 # Load videos for selected playlist
 with st.spinner("Loading playlist videos..."):
@@ -217,9 +233,21 @@ with st.spinner("Loading playlist videos..."):
     if videos_df.empty:
         st.warning(f"No videos found in the '{playlist_name}' playlist.")
         st.stop()
+    
+    # Convert dates and apply date filter
+    videos_df['publishedAt'] = pd.to_datetime(videos_df['publishedAt'])
+    videos_df = videos_df[
+        (videos_df['publishedAt'].dt.date >= start_date) & 
+        (videos_df['publishedAt'].dt.date <= end_date)
+    ]
+    
+    if videos_df.empty:
+        st.warning(f"No videos found in the selected date range ({start_date} to {end_date}).")
+        st.stop()
 
 # Display basic playlist stats
 st.markdown(f"<h2 class='sub-header'>Analysis: {playlist_name}</h2>", unsafe_allow_html=True)
+st.markdown(f"Showing data for videos published between **{start_date}** and **{end_date}**")
 
 video_count = len(videos_df)
 total_views = videos_df['viewCount'].sum()
@@ -262,9 +290,6 @@ with col4:
 
 # Performance metrics over time
 st.subheader("Performance Trends")
-
-# Convert published date to datetime
-videos_df['publishedAt'] = pd.to_datetime(videos_df['publishedAt'])
 
 # Sort by published date
 videos_df_sorted = videos_df.sort_values('publishedAt')
@@ -627,13 +652,14 @@ if st.button("Generate Excel Report"):
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             # Summary sheet
             summary_data = {
-                'Metric': ['Playlist Name', 'Video Count', 'Total Views', 'Average Views', 'Average Engagement'],
+                'Metric': ['Playlist Name', 'Video Count', 'Total Views', 'Average Views', 'Average Engagement', 'Date Range'],
                 'Value': [
                     playlist_name,
                     video_count,
                     total_views,
                     avg_views,
-                    videos_df['engagementScore'].mean()
+                    videos_df['engagementScore'].mean(),
+                    f"{start_date} to {end_date}"
                 ]
             }
             pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
@@ -661,6 +687,6 @@ if st.button("Generate Excel Report"):
         st.download_button(
             label="Download Excel Report",
             data=output,
-            file_name=f"{playlist_name}_analysis.xlsx",
+            file_name=f"{playlist_name}_analysis_{start_date}_to_{end_date}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )

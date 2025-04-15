@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from collections import Counter
 from wordcloud import WordCloud
@@ -60,6 +60,20 @@ st.markdown("""
         border-radius: 0.5rem;
         margin-bottom: 0.5rem;
     }
+    .recommendation-section {
+        background: #0066CC22;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .recommendation-title {
+        font-weight: bold;
+        font-size: 1.2rem;
+        margin-bottom: 0.5rem;
+    }
+    .recommendation-point {
+        margin-bottom: 0.3rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,8 +88,8 @@ if 'api' not in st.session_state:
 
 # Cache functions to improve performance
 @st.cache_data(ttl=3600)
-def search_youtube(_api, query, max_results=50):
-    """Search YouTube and get video details"""
+def search_youtube(_api, query, max_results=50, published_after=None, published_before=None):
+    """Search YouTube and get video details with date filtering"""
     search_results = _api.search_videos(query, max_results)
     
     if not search_results:
@@ -96,12 +110,21 @@ def search_youtube(_api, query, max_results=50):
     if not details_df.empty:
         details_df['channelTitle'] = details_df['id'].map(lambda x: channel_info.get(x, {}).get('channelTitle', ''))
         details_df['channelId'] = details_df['id'].map(lambda x: channel_info.get(x, {}).get('channelId', ''))
+        
+        # Apply date filters if provided
+        if published_after or published_before:
+            details_df['publishedAt'] = pd.to_datetime(details_df['publishedAt'])
+            
+            if published_after:
+                details_df = details_df[details_df['publishedAt'] >= published_after]
+            if published_before:
+                details_df = details_df[details_df['publishedAt'] <= published_before]
     
     return details_df
 
 @st.cache_data(ttl=3600)
-def search_my_channel(_api, channel_id, query, max_results=10):
-    """Search for videos on my channel matching the query"""
+def search_my_channel(_api, channel_id, query, max_results=10, published_after=None, published_before=None):
+    """Search for videos on my channel matching the query with date filtering"""
     # Add channel filter to the query
     channel_query = f"{query} channelId:{channel_id}"
     
@@ -116,6 +139,15 @@ def search_my_channel(_api, channel_id, query, max_results=10):
     
     # Get detailed stats
     details_df = _api.get_videos_details(video_ids)
+    
+    # Apply date filters if provided
+    if not details_df.empty and (published_after or published_before):
+        details_df['publishedAt'] = pd.to_datetime(details_df['publishedAt'])
+        
+        if published_after:
+            details_df = details_df[details_df['publishedAt'] >= published_after]
+        if published_before:
+            details_df = details_df[details_df['publishedAt'] <= published_before]
     
     return details_df
 
@@ -149,6 +181,104 @@ def analyze_title_keywords(df, min_count=2):
     return popular_keywords
 
 @st.cache_data
+def analyze_descriptions(df, min_count=2):
+    """Analyze common phrases in descriptions of top performing videos"""
+    if df.empty or len(df) < 4:  # Need at least 4 videos for meaningful analysis
+        return []
+        
+    # Get top performers (top 25%)
+    df_sorted = df.sort_values(by='viewCount', ascending=False)
+    cutoff = max(int(len(df_sorted) * 0.25), 1)
+    top_performers = df_sorted.iloc[:cutoff]
+    
+    # Extract common phrases from descriptions
+    all_descriptions = ' '.join(top_performers['description'].fillna('').str.lower())
+    
+    # Look for common patterns in descriptions
+    url_pattern = re.compile(r'https?://\S+')
+    urls = url_pattern.findall(all_descriptions)
+    url_counter = Counter(urls)
+    
+    # Look for sentence patterns (sentences that appear in multiple descriptions)
+    sentences = re.split(r'[.!?]', all_descriptions)
+    # Filter out very short sentences and trim whitespace
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    sentence_counter = Counter(sentences)
+    
+    # Find common phrases (3+ words)
+    phrases = []
+    words = all_descriptions.split()
+    for i in range(len(words)-2):
+        phrase = ' '.join(words[i:i+3])
+        if len(phrase) > 10:  # Minimum length to avoid common words
+            phrases.append(phrase)
+    phrase_counter = Counter(phrases)
+    
+    # Combine insights
+    description_patterns = []
+    
+    # Add common URLs (might be channel links, social media, etc.)
+    for url, count in url_counter.most_common(5):
+        if count >= min_count:
+            description_patterns.append({
+                'type': 'url',
+                'content': url,
+                'count': count
+            })
+    
+    # Add common sentences
+    for sentence, count in sentence_counter.most_common(3):
+        if count >= min_count:
+            description_patterns.append({
+                'type': 'sentence',
+                'content': sentence,
+                'count': count
+            })
+    
+    # Add common phrases
+    for phrase, count in phrase_counter.most_common(5):
+        if count >= min_count:
+            description_patterns.append({
+                'type': 'phrase',
+                'content': phrase,
+                'count': count
+            })
+    
+    return description_patterns
+
+@st.cache_data
+def extract_hashtags(df, min_count=2):
+    """Extract hashtags from titles and descriptions of top videos"""
+    if df.empty or len(df) < 4:
+        return []
+    
+    # Sort by performance
+    df_sorted = df.sort_values(by='viewCount', ascending=False)
+    
+    # Get top performers (top 33%)
+    cutoff = max(int(len(df_sorted) * 0.33), 1)
+    top_performers = df_sorted.iloc[:cutoff]
+    
+    # Combine titles and descriptions
+    all_text = ' '.join(top_performers['title'] + ' ' + top_performers['description'].fillna(''))
+    
+    # Extract hashtags
+    hashtag_pattern = re.compile(r'#\w+')
+    hashtags = hashtag_pattern.findall(all_text.lower())
+    
+    # Count frequencies
+    hashtag_counter = Counter(hashtags)
+    
+    # Return most common hashtags
+    common_hashtags = [
+        {'hashtag': tag, 'count': count}
+        for tag, count in hashtag_counter.most_common(10)
+        if count >= min_count
+    ]
+    
+    return common_hashtags
+
+@st.cache_data
 def identify_opportunities(competitor_videos, my_videos=None):
     """Identify content opportunities based on competitor analysis"""
     if competitor_videos.empty:
@@ -166,7 +296,34 @@ def identify_opportunities(competitor_videos, my_videos=None):
             'description': f"Top performing videos frequently use these keywords: {top_keywords}",
         })
     
-    # 2. Check if we have similar content
+    # 2. Extract description patterns
+    description_patterns = analyze_descriptions(competitor_videos)
+    if description_patterns:
+        # Find a representative pattern
+        pattern_example = ""
+        for pattern in description_patterns:
+            if pattern['type'] == 'sentence' and len(pattern['content']) < 100:
+                pattern_example = pattern['content']
+                break
+        
+        if pattern_example:
+            opportunities.append({
+                'type': 'description',
+                'title': 'Description Strategy',
+                'description': f"Top videos use similar description patterns, example: \"{pattern_example}\"",
+            })
+    
+    # 3. Extract hashtags
+    hashtags = extract_hashtags(competitor_videos)
+    if hashtags:
+        top_hashtags = ", ".join([h['hashtag'] for h in hashtags[:5]])
+        opportunities.append({
+            'type': 'hashtags',
+            'title': 'Popular Hashtags',
+            'description': f"Top videos use these hashtags: {top_hashtags}",
+        })
+    
+    # 4. Check if we have similar content
     if my_videos is not None and not my_videos.empty:
         # Compare average views
         my_avg_views = my_videos['viewCount'].mean()
@@ -190,6 +347,14 @@ def identify_opportunities(competitor_videos, my_videos=None):
                 'title': 'Engagement Gap',
                 'description': "Your videos have lower engagement. Focus on improving content quality and viewer interaction.",
             })
+            
+        # Check video frequency
+        if len(my_videos) < len(competitor_videos) / 3:
+            opportunities.append({
+                'type': 'frequency',
+                'title': 'Content Frequency',
+                'description': f"Top channels publish more frequently on this topic. Consider increasing your publishing cadence.",
+            })
     else:
         # We don't have content in this category
         opportunities.append({
@@ -198,7 +363,7 @@ def identify_opportunities(competitor_videos, my_videos=None):
             'description': "You don't have content on this topic yet. This could be an opportunity to expand.",
         })
     
-    # 3. Identify optimal duration
+    # 5. Identify optimal duration
     duration_analysis = competitor_videos.groupby(pd.cut(
         competitor_videos['duration_minutes'], 
         bins=[0, 5, 10, 15, 20, 30, 60, float('inf')],
@@ -221,7 +386,7 @@ def identify_opportunities(competitor_videos, my_videos=None):
             'description': f"Videos between {best_duration['Duration']} perform best with an average of {int(best_duration['Avg Views']):,} views.",
         })
     
-    # 4. Identify top channels
+    # 6. Identify top channels
     top_channels = competitor_videos.groupby('channelTitle').agg({
         'viewCount': 'mean',
         'id': 'count'
@@ -244,43 +409,73 @@ def identify_opportunities(competitor_videos, my_videos=None):
 st.subheader("Search for Videos")
 
 with st.form("youtube_search_form"):
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2 = st.columns([3, 1])
     
     with col1:
-        search_query = st.text_input("Enter search query (e.g., 'Joshua Heward-Mills sermon')")
+        search_query = st.text_input("Enter search query (e.g., 'Christian sermon', 'Bible study')")
+        
+        # Add date range filter
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            default_start_date = datetime.now() - timedelta(days=365)  # Default to last year
+            published_after = st.date_input("Published After", value=default_start_date)
+        
+        with date_col2:
+            published_before = st.date_input("Published Before", value=datetime.now())
     
     with col2:
         max_results = st.slider("Max results", 10, 100, 50)
-    
-    with col3:
         include_my_channel = st.checkbox("Include my channel", value=True)
     
     submit_search = st.form_submit_button("Search YouTube")
 
 # Process search when submitted
 if submit_search and search_query:
-    with st.spinner(f"Searching YouTube for: {search_query}"):
-        # Perform search
-        competitor_videos = search_youtube(st.session_state.api, search_query, max_results)
-        
-        # Get my channel's videos on this topic if requested
-        my_videos = None
-        if include_my_channel:
-            my_videos = search_my_channel(st.session_state.api, st.session_state.channel_id, search_query)
-        
-        # Store results in session state
-        st.session_state.competitor_videos = competitor_videos
-        st.session_state.my_videos = my_videos
-        st.session_state.search_query = search_query
+    # Convert dates to datetime
+    published_after_dt = datetime.combine(published_after, datetime.min.time())
+    published_before_dt = datetime.combine(published_before, datetime.max.time())
+    
+    if published_after > published_before:
+        st.error("Start date must be before end date")
+    else:
+        with st.spinner(f"Searching YouTube for: {search_query}"):
+            # Perform search with date filtering
+            competitor_videos = search_youtube(
+                st.session_state.api, 
+                search_query, 
+                max_results, 
+                published_after_dt, 
+                published_before_dt
+            )
+            
+            # Get my channel's videos on this topic if requested
+            my_videos = None
+            if include_my_channel:
+                my_videos = search_my_channel(
+                    st.session_state.api, 
+                    st.session_state.channel_id, 
+                    search_query, 
+                    published_after=published_after_dt, 
+                    published_before=published_before_dt
+                )
+            
+            # Store results in session state
+            st.session_state.competitor_videos = competitor_videos
+            st.session_state.my_videos = my_videos
+            st.session_state.search_query = search_query
+            st.session_state.date_range = f"{published_after} to {published_before}"
 
 # Display search results if available
 if 'competitor_videos' in st.session_state and not st.session_state.competitor_videos.empty:
     competitor_df = st.session_state.competitor_videos
     my_videos_df = st.session_state.my_videos if 'my_videos' in st.session_state else None
     search_query = st.session_state.search_query
+    date_range = st.session_state.get('date_range', '')
     
     # Show search summary
     st.markdown(f"<h2 class='sub-header'>Results for: {search_query}</h2>", unsafe_allow_html=True)
+    if date_range:
+        st.markdown(f"Showing videos published during **{date_range}**")
     
     # Display key metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -385,6 +580,36 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
         fig.update_traces(textposition='outside')
         st.plotly_chart(fig, use_container_width=True)
         
+        # Competition comparison recommendations
+        view_diff_pct = ((comparison_data['Competitors'][1] - comparison_data['Your Channel'][1]) / 
+                        max(1, comparison_data['Your Channel'][1])) * 100
+        
+        view_comparison = (
+            "significantly outperform your content" if view_diff_pct > 50 else
+            "perform better than your content" if view_diff_pct > 10 else
+            "perform similarly to your content" if abs(view_diff_pct) <= 10 else
+            "perform worse than your content"
+        )
+        
+        engagement_diff_pct = ((comparison_data['Competitors'][4] - comparison_data['Your Channel'][4]) / 
+                            max(0.001, comparison_data['Your Channel'][4])) * 100
+        
+        engagement_comparison = (
+            "much higher engagement" if engagement_diff_pct > 30 else
+            "better engagement" if engagement_diff_pct > 10 else
+            "similar engagement" if abs(engagement_diff_pct) <= 10 else
+            "lower engagement"
+        )
+        
+        st.markdown(f"""
+        <div class="recommendation-section">
+            <p class="recommendation-title">🔍 Competitive Analysis Recommendations:</p>
+            <p class="recommendation-point">1. Competitor videos {view_comparison} on this topic with {abs(view_diff_pct):.1f}% {'more' if view_diff_pct > 0 else 'fewer'} views on average.</p>
+            <p class="recommendation-point">2. Competitors have {engagement_comparison} rates compared to your content.</p>
+            <p class="recommendation-point">3. {'Increase your posting frequency on this topic to build audience interest.' if len(my_videos_df) < 5 else 'Continue maintaining a consistent publishing schedule to retain audience interest.'}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
         # Display our videos matching the search
         st.subheader("Your Videos on This Topic")
         
@@ -427,6 +652,20 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
     )
     fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=500)
     st.plotly_chart(fig, use_container_width=True)
+    
+    # Top videos recommendations
+    top_video = top_videos.iloc[0] if not top_videos.empty else None
+    top_title_words = analyze_title_keywords(top_videos)
+    top_keywords = ", ".join([k['keyword'] for k in top_title_words[:3]]) if top_title_words else "N/A"
+    
+    st.markdown(f"""
+    <div class="recommendation-section">
+        <p class="recommendation-title">🏆 Top Content Strategy Recommendations:</p>
+        <p class="recommendation-point">1. Study the format and presentation style of top-performing videos like "{top_video['title'] if top_video is not None else 'top videos'}".</p>
+        <p class="recommendation-point">2. Incorporate high-performing keywords like "{top_keywords}" in your titles and descriptions.</p>
+        <p class="recommendation-point">3. {'Create thumbnail styles similar to top performers to improve click-through rates.' if top_video is not None else 'Create eye-catching thumbnails with clear text overlays.'}</p>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Channel analysis
     st.subheader("Top Channels in This Category")
@@ -489,6 +728,84 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
     fig.update_layout(yaxis={'categoryorder':'total ascending'})
     st.plotly_chart(fig, use_container_width=True)
     
+    # Top channel recommendations
+    top_channel = channel_stats.iloc[0]['Channel'] if not channel_stats.empty else "top channels"
+    
+    st.markdown(f"""
+    <div class="recommendation-section">
+        <p class="recommendation-title">📡 Channel Strategy Recommendations:</p>
+        <p class="recommendation-point">1. Study {top_channel}'s content strategy, posting frequency, and audience engagement techniques.</p>
+        <p class="recommendation-point">2. Analyze how top channels structure their video introductions to hook viewers quickly.</p>
+        <p class="recommendation-point">3. Examine their community engagement practices in comments and channel community posts.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Description and hashtag analysis
+    st.subheader("Content Strategy Analysis")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Description patterns analysis
+        st.markdown("##### Description Patterns in Top Videos")
+        description_patterns = analyze_descriptions(competitor_df)
+        
+        if description_patterns:
+            for pattern in description_patterns:
+                pattern_type = pattern['type']
+                content = pattern['content']
+                count = pattern['count']
+                
+                if pattern_type == 'url':
+                    st.markdown(f"🔗 **Common URL** ({count} videos): `{content}`")
+                elif pattern_type == 'sentence':
+                    st.markdown(f"📝 **Common Text** ({count} videos): '{content}'")
+                elif pattern_type == 'phrase':
+                    st.markdown(f"🔤 **Common Phrase** ({count} videos): '{content}'")
+        else:
+            st.info("Not enough data to identify common description patterns.")
+    
+    with col2:
+        # Hashtag analysis
+        st.markdown("##### Common Hashtags in Top Videos")
+        hashtags = extract_hashtags(competitor_df)
+        
+        if hashtags:
+            # Create DataFrame for visualization
+            hashtags_df = pd.DataFrame(hashtags)
+            
+            # Create bar chart of hashtags
+            fig = px.bar(
+                hashtags_df,
+                x='count',
+                y='hashtag',
+                orientation='h',
+                title="Common Hashtags in Top Performing Videos",
+                color='count',
+                color_continuous_scale=px.colors.sequential.Reds
+            )
+            fig.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No common hashtags found in top videos.")
+    
+    # Description and hashtag recommendations
+    common_hashtags = ", ".join([h['hashtag'] for h in hashtags[:5]]) if hashtags else "#NoHashtagsFound"
+    has_urls = any(p['type'] == 'url' for p in description_patterns) if description_patterns else False
+    
+    st.markdown(f"""
+    <div class="recommendation-section">
+        <p class="recommendation-title">📋 Description & Hashtag Strategy:</p>
+        <p class="recommendation-point">1. {'Include common hashtags like ' + common_hashtags + ' in your descriptions for better discoverability.' if hashtags else 'Add relevant hashtags to improve discoverability in search results.'}</p>
+        <p class="recommendation-point">2. {'Include key links in your descriptions as top performers do.' if has_urls else 'Add links to your social media profiles and related content in descriptions.'}</p>
+        <p class="recommendation-point">3. Create a standardized description template that includes:
+           <br>• A compelling first 2-3 lines that summarize the video content
+           <br>• Links to your social media and related content
+           <br>• Relevant hashtags to improve discoverability
+           <br>• A call-to-action encouraging viewers to subscribe and engage</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
     # Keyword analysis
     st.subheader("Popular Keywords in Titles")
     
@@ -538,6 +855,21 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
             buf.seek(0)
             
             st.image(buf, use_column_width=True)
+            
+        # Title optimization recommendations
+        top_keywords = ", ".join([k['keyword'] for k in keywords[:5]])
+        
+        st.markdown(f"""
+        <div class="recommendation-section">
+            <p class="recommendation-title">✏️ Title Optimization Strategy:</p>
+            <p class="recommendation-point">1. Include high-performing keywords like "{top_keywords}" in your titles.</p>
+            <p class="recommendation-point">2. Create title templates that follow successful patterns from competitors:
+               <br>• Include numbers when appropriate (e.g., "5 Ways to...", "3 Tips for...")
+               <br>• Use power words that evoke emotion
+               <br>• Keep titles between 40-60 characters for optimal display</p>
+            <p class="recommendation-point">3. A/B test different title formats to see what works best with your audience.</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         st.info("Not enough data to generate keyword analysis.")
     
@@ -591,6 +923,16 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
         <p><strong>Optimal Duration:</strong> Videos in the <b>{best_duration['Duration']}</b> range perform best with an average of {int(best_duration['Avg Views']):,} views.</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Duration recommendations
+        st.markdown(f"""
+        <div class="recommendation-section">
+            <p class="recommendation-title">⏱️ Video Duration Strategy:</p>
+            <p class="recommendation-point">1. Target a duration of {best_duration['Duration']} for optimal performance on this topic.</p>
+            <p class="recommendation-point">2. For longer topics, consider breaking content into multiple videos in this optimal range.</p>
+            <p class="recommendation-point">3. Pay special attention to viewer retention in the first 30-60 seconds, as this is when most viewers decide whether to continue watching.</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     # Content opportunities
     st.subheader("Content Opportunities")
@@ -605,6 +947,33 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
             <p><strong>{opportunity['title']}:</strong> {opportunity['description']}</p>
             </div>
             """, unsafe_allow_html=True)
+            
+        # Comprehensive strategy recommendations
+        st.markdown("""
+        <div class="recommendation-section">
+            <p class="recommendation-title">🚀 Comprehensive Content Strategy:</p>
+            
+            <p style="font-weight:bold; margin-top:10px; margin-bottom:5px;">Content Creation:</p>
+            <p class="recommendation-point">• Focus on the topics and formats that perform best in this niche.</p>
+            <p class="recommendation-point">• Aim for the optimal video duration identified in the analysis.</p>
+            <p class="recommendation-point">• Create a consistent publishing schedule to build audience expectations.</p>
+            
+            <p style="font-weight:bold; margin-top:10px; margin-bottom:5px;">SEO & Discoverability:</p>
+            <p class="recommendation-point">• Use the identified high-performing keywords in titles, descriptions, and tags.</p>
+            <p class="recommendation-point">• Include relevant hashtags in both video titles and descriptions.</p>
+            <p class="recommendation-point">• Create eye-catching thumbnails with clear text that incorporates keywords.</p>
+            
+            <p style="font-weight:bold; margin-top:10px; margin-bottom:5px;">Audience Engagement:</p>
+            <p class="recommendation-point">• Include clear calls-to-action in your videos to boost engagement metrics.</p>
+            <p class="recommendation-point">• Respond to comments promptly to build community and improve engagement signals.</p>
+            <p class="recommendation-point">• Use end screens and cards to keep viewers on your channel longer.</p>
+            
+            <p style="font-weight:bold; margin-top:10px; margin-bottom:5px;">Competitive Advantage:</p>
+            <p class="recommendation-point">• Study top-performing channels but find ways to differentiate your content.</p>
+            <p class="recommendation-point">• Fill content gaps that competitors aren't addressing.</p>
+            <p class="recommendation-point">• Consider collaborations with complementary channels to expand your audience.</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         st.info("No clear opportunities identified. Try a more specific search query.")
     
@@ -620,10 +989,11 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 # Summary sheet
                 summary_data = {
-                    'Metric': ['Search Query', 'Videos Found', 'Unique Channels', 
+                    'Metric': ['Search Query', 'Date Range', 'Videos Found', 'Unique Channels', 
                               'Average Views', 'Average Likes', 'Average Engagement'],
                     'Value': [
                         search_query,
+                        date_range,
                         len(competitor_df),
                         competitor_df['channelTitle'].nunique(),
                         competitor_df['viewCount'].mean(),
@@ -632,6 +1002,14 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
                     ]
                 }
                 pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Recommendations sheet
+                if opportunities:
+                    recommendations_data = {
+                        'Category': [opp['title'] for opp in opportunities],
+                        'Recommendation': [opp['description'] for opp in opportunities]
+                    }
+                    pd.DataFrame(recommendations_data).to_excel(writer, sheet_name='Recommendations', index=False)
                 
                 # Top Videos sheet
                 export_cols = ['title', 'channelTitle', 'viewCount', 'likeCount', 'commentCount', 
@@ -647,6 +1025,13 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
                 # Channel Analysis sheet
                 channel_stats.to_excel(writer, sheet_name='Channel Analysis', index=False)
                 
+                # Keywords sheet
+                if keywords:
+                    pd.DataFrame(keywords).to_excel(writer, sheet_name='Keywords', index=False)
+                
+                # Duration Analysis sheet
+                duration_stats.to_excel(writer, sheet_name='Duration Analysis', index=False)
+                
                 # My Videos sheet (if available)
                 if my_videos_df is not None and not my_videos_df.empty:
                     my_export_df = my_videos_df[export_cols].copy()
@@ -659,7 +1044,7 @@ if 'competitor_videos' in st.session_state and not st.session_state.competitor_v
             st.download_button(
                 label="Download Excel Report",
                 data=output,
-                file_name=f"competitor_analysis_{search_query.replace(' ', '_')}.xlsx",
+                file_name=f"competitor_analysis_{search_query.replace(' ', '_')}_{date_range.replace(' to ', '-').replace(' ', '_')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 else:
